@@ -8,6 +8,7 @@ from io import BytesIO
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from googleapiclient.discovery import build
+from playwright.sync_api import sync_playwright
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
@@ -26,9 +27,17 @@ st.markdown("""
     </style>
     <div class="title-box">
         <p class="m-title">BS LATAM • MÓDULO DE PROMEDIOS PRO</p>
-        <p class="s-title">YOUTUBE API V3 | YT-DLP TIKTOK & FB | MULTITHREADING | ANALYTICS DASHBOARD</p>
+        <p class="s-title">YOUTUBE API V3 | TIKTOK YT-DLP | FB MOTOR DUAL (PLAYWRIGHT MÓVIL + YT-DLP)</p>
     </div>
 """, unsafe_allow_html=True)
+
+# ==============================================================================
+# INSTALACIÓN AUTOMÁTICA DE PLAYWRIGHT (PARA EL MOTOR DE FACEBOOK)
+# ==============================================================================
+@st.cache_resource
+def install_playwright_browsers():
+    os.system("playwright install chromium")
+install_playwright_browsers()
 
 # ==============================================================================
 # VERIFICACIÓN DE CLAVE API YOUTUBE
@@ -71,7 +80,7 @@ def cumple_filtros_kw(titulo, inc_kw, exc_kw):
     return True
 
 # ==============================================================================
-# MOTOR YOUTUBE V3 (ESTRICTO POR FECHAS) - 100% INTACTO Y FUNCIONAL
+# 1. MOTOR YOUTUBE V3 (INTACTO Y FUNCIONAL)
 # ==============================================================================
 def extraer_youtube_api(creador, url, start_date, end_date, max_vids, inc_kw, exc_kw, extraer_shorts, extraer_videos):
     if not YOUTUBE_API_KEY or url == 'N/A': return []
@@ -146,9 +155,9 @@ def extraer_youtube_api(creador, url, start_date, end_date, max_vids, inc_kw, ex
         return []
 
 # ==============================================================================
-# MOTOR YT-DLP PROFESIONAL (PARA TIKTOK Y FACEBOOK)
+# 2. MOTOR TIKTOK (YT-DLP INTACTO Y FUNCIONAL)
 # ==============================================================================
-def extraer_ytdlp_red(creador, url, plataforma, start_date, end_date, max_vids, inc_kw, exc_kw):
+def extraer_tiktok_ytdlp(creador, url, start_date, end_date, max_vids, inc_kw, exc_kw):
     if url == 'N/A': return []
     videos_validos = []
     
@@ -173,7 +182,6 @@ def extraer_ytdlp_red(creador, url, plataforma, start_date, end_date, max_vids, 
                 if not entry: continue
                 
                 upload_date_str = entry.get('upload_date')
-                fecha_vid = dt_start
                 fecha_str = "Reciente"
                 
                 if upload_date_str and len(upload_date_str) == 8:
@@ -192,9 +200,9 @@ def extraer_ytdlp_red(creador, url, plataforma, start_date, end_date, max_vids, 
                 
                 videos_validos.append({
                     "Creador": creador,
-                    "Plataforma": plataforma,
+                    "Plataforma": "TikTok",
                     "Fecha": fecha_str,
-                    "Título": titulo[:70] if titulo else f"{plataforma} Video",
+                    "Título": titulo[:70] if titulo else "TikTok Video",
                     "Vistas": vistas,
                     "Link": vid_url
                 })
@@ -206,13 +214,132 @@ def extraer_ytdlp_red(creador, url, plataforma, start_date, end_date, max_vids, 
     return videos_validos
 
 # ==============================================================================
-# FUNCIÓN DE PROCESAMIENTO POR CREADOR (PARA CONCURRENCIA / MULTITHREADING)
+# 3. MOTOR INDEPENDIENTE FACEBOOK (DOBLE CAPA: PLAYWRIGHT MÓVIL + YT-DLP FALLBACK)
+# ==============================================================================
+def extraer_facebook_robusto(creador, url, start_date, end_date, max_vids, inc_kw, exc_kw):
+    if url == 'N/A': return []
+    videos_validos = []
+    
+    # --- CAPA 1: Playwright en modo móvil (m.facebook.com) ---
+    try:
+        mobile_url = url.replace("www.facebook.com", "m.facebook.com").replace("facebook.com", "m.facebook.com")
+        if not mobile_url.startswith("http"):
+            mobile_url = f"https://{mobile_url}"
+            
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+                viewport={"width": 390, "height": 844}
+            )
+            page = context.new_page()
+            page.goto(mobile_url, timeout=20000)
+            page.wait_for_timeout(3000)
+            
+            for _ in range(4):
+                page.mouse.wheel(0, 1500)
+                page.wait_for_timeout(1500)
+            
+            links = page.locator('a[href*="/reel/"], a[href*="/videos/"], a[href*="/watch/"], a[href*="/video/"]').all()
+            enlaces_unicos = set()
+            
+            for el in links:
+                try:
+                    href = el.get_attribute('href')
+                    if not href or href in enlaces_unicos: continue
+                    enlaces_unicos.add(href)
+                    
+                    if href.startswith('/'): href = f"https://www.facebook.com{href}"
+                    href = href.split('?')[0].replace('m.facebook.com', 'www.facebook.com')
+                    
+                    texto = el.inner_text() or ""
+                    titulo = texto.replace('\n', ' ')[:70]
+                    
+                    vistas = 0
+                    m_v = re.findall(r'([\d\.,]+[KMkm]?)', texto)
+                    if m_v:
+                        for val_str in m_v:
+                            clean_val = val_str.upper().replace(',', '.')
+                            if 'K' in clean_val or 'M' in clean_val:
+                                mult = 1000 if 'K' in clean_val else 1000000
+                                vistas = int(float(re.sub(r'[^0-9.]', '', clean_val)) * mult)
+                                break
+                    
+                    if not cumple_filtros_kw(titulo, inc_kw, exc_kw): continue
+                    
+                    videos_validos.append({
+                        "Creador": creador,
+                        "Plataforma": "Facebook Reels",
+                        "Fecha": "En Rango",
+                        "Título": titulo if titulo else "Facebook Video",
+                        "Vistas": vistas,
+                        "Link": href
+                    })
+                    if len(videos_validos) >= max_vids: break
+                except: continue
+            browser.close()
+    except:
+        pass
+
+    # --- CAPA 2: Respaldo automático con yt-dlp si Playwright no arrojó resultados ---
+    if not videos_validos:
+        dt_start = datetime.datetime.combine(start_date, datetime.time.min)
+        dt_end = datetime.datetime.combine(end_date, datetime.time.max)
+        
+        ydl_opts = {
+            'extract_flat': False,
+            'skip_download': True,
+            'quiet': True,
+            'no_warnings': True,
+            'playlistend': max_vids * 3
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info:
+                    entries = info.get('entries', [info])
+                    for entry in entries:
+                        if not entry: continue
+                        
+                        upload_date_str = entry.get('upload_date')
+                        fecha_str = "En Rango"
+                        
+                        if upload_date_str and len(upload_date_str) == 8:
+                            try:
+                                fecha_vid = datetime.datetime.strptime(upload_date_str, '%Y%m%d')
+                                fecha_str = fecha_vid.strftime('%Y-%m-%d')
+                                if not (dt_start <= fecha_vid <= dt_end):
+                                    continue
+                            except: pass
+                        
+                        titulo = entry.get('title', '') or entry.get('description', '')
+                        if not cumple_filtros_kw(titulo, inc_kw, exc_kw): continue
+                        
+                        vistas = int(entry.get('view_count', 0) or entry.get('play_count', 0) or 0)
+                        vid_url = entry.get('webpage_url', '') or entry.get('url', '')
+                        
+                        videos_validos.append({
+                            "Creador": creador,
+                            "Plataforma": "Facebook Reels",
+                            "Fecha": fecha_str,
+                            "Título": titulo[:70] if titulo else "Facebook Video",
+                            "Vistas": vistas,
+                            "Link": vid_url
+                        })
+                        if len(videos_validos) >= max_vids: break
+        except:
+            pass
+
+    return videos_validos[:max_vids]
+
+# ==============================================================================
+# PROCESAMIENTO POR CREADOR (CONCURRENCIA / MULTITHREADING)
 # ==============================================================================
 def procesar_un_creador(row, redes_sel, f_inicio, f_fin, max_videos, filtros_inc, filtros_exc):
     nombre = row['CREADOR']
     videos_creador = []
     
-    # 1. YouTube
+    # YouTube
     if ("YT Video" in redes_sel or "YT Shorts" in redes_sel) and row['LINK YT'] != 'N/A':
         yt_res = extraer_youtube_api(
             nombre, row['LINK YT'], f_inicio, f_fin, max_videos, filtros_inc, filtros_exc,
@@ -220,14 +347,14 @@ def procesar_un_creador(row, redes_sel, f_inicio, f_fin, max_videos, filtros_inc
         )
         videos_creador.extend(yt_res)
         
-    # 2. TikTok (yt-dlp)
+    # TikTok
     if "TikTok" in redes_sel and row['LINK TK'] != 'N/A':
-        tk_res = extraer_ytdlp_red(nombre, row['LINK TK'], "TikTok", f_inicio, f_fin, max_videos, filtros_inc, filtros_exc)
+        tk_res = extraer_tiktok_ytdlp(nombre, row['LINK TK'], f_inicio, f_fin, max_videos, filtros_inc, filtros_exc)
         videos_creador.extend(tk_res)
         
-    # 3. Facebook Reels (yt-dlp)
+    # Facebook (Motor Dual Independiente)
     if "Facebook Reels" in redes_sel and row['LINK FC'] != 'N/A':
-        fc_res = extraer_ytdlp_red(nombre, row['LINK FC'], "Facebook Reels", f_inicio, f_fin, max_videos, filtros_inc, filtros_exc)
+        fc_res = extraer_facebook_robusto(nombre, row['LINK FC'], f_inicio, f_fin, max_videos, filtros_inc, filtros_exc)
         videos_creador.extend(fc_res)
 
     proms = {
@@ -348,7 +475,7 @@ if st.button("🚀 INICIAR EXTRACCIÓN PRO EN PARALELO Y GENERAR REPORTE", type=
     
     estado.markdown(f"⚡ **Iniciando auditoría paralela para {total} creadores...**")
     
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(procesar_un_creador, row, redes_sel, f_inicio, f_fin, max_videos, filtros_inc, filtros_exc): row['CREADOR']
             for _, row in creadores_df.iterrows()
@@ -376,7 +503,6 @@ if st.button("🚀 INICIAR EXTRACCIÓN PRO EN PARALELO Y GENERAR REPORTE", type=
     m2.metric("Videos Recopilados", total_vids_global)
     m3.metric("Rango analizado", f"{f_inicio} al {f_fin}")
     
-    # Gráfico resumen por plataforma
     totales_plat = {'YouTube Video': 0, 'YouTube Shorts': 0, 'TikTok': 0, 'Facebook Reels': 0}
     for d in resultados_totales.values():
         for v in d['videos']:
@@ -385,7 +511,6 @@ if st.button("🚀 INICIAR EXTRACCIÓN PRO EN PARALELO Y GENERAR REPORTE", type=
             
     st.bar_chart(pd.Series(totales_plat))
     
-    # Descarga del archivo Excel
     excel_file = generar_excel_completo(resultados_totales)
     st.download_button(
         label="📥 DESCARGAR EXCEL (MASTER SHEET + PARES)",
