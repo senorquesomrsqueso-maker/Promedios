@@ -1,15 +1,13 @@
 import streamlit as st
 import pandas as pd
 import re
-import random
 import datetime
 import os
-import time
+import json
 from io import BytesIO
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font, PatternFill, Alignment
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 from playwright.sync_api import sync_playwright
 
 # ==============================================================================
@@ -28,12 +26,12 @@ st.markdown("""
     </style>
     <div class="title-box">
         <p class="m-title">BS LATAM • MÓDULO DE PROMEDIOS PRO</p>
-        <p class="s-title">API YOUTUBE V3 | PLAYWRIGHT TK & FB | REPORTES PAREADOS + MASTER SHEET</p>
+        <p class="s-title">API YOUTUBE V3 | TIKTOK & FB PLAYWRIGHT PRO | MASTER SHEET + ROSTER</p>
     </div>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# INSTALACIÓN AUTOMÁTICA DE PLAYWRIGHT PARA STREAMLIT CLOUD
+# INSTALACIÓN AUTOMÁTICA DE PLAYWRIGHT
 # ==============================================================================
 @st.cache_resource
 def install_playwright_browsers():
@@ -81,13 +79,12 @@ def cumple_filtros_kw(titulo, inc_kw, exc_kw):
     return True
 
 # ==============================================================================
-# MOTOR YOUTUBE V3 (ESTRICTO POR FECHAS)
+# MOTOR YOUTUBE V3 (ESTRICTO POR FECHAS) - INTACTO
 # ==============================================================================
 def extraer_youtube_api(creador, url, start_date, end_date, max_vids, inc_kw, exc_kw, extraer_shorts, extraer_videos):
     if not YOUTUBE_API_KEY or url == 'N/A': return []
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
     
-    # 1. Obtener Channel ID
     channel_id = None
     try:
         if '@' in url:
@@ -101,10 +98,7 @@ def extraer_youtube_api(creador, url, start_date, end_date, max_vids, inc_kw, ex
     
     if not channel_id: return []
 
-    # 2. Buscar videos estrictamente en el rango de fechas
-    videos_data = []
     try:
-        # Formato RFC 3339 requerido por la API
         dt_start = datetime.datetime.combine(start_date, datetime.time.min).isoformat() + 'Z'
         dt_end = datetime.datetime.combine(end_date, datetime.time.max).isoformat() + 'Z'
         
@@ -120,10 +114,8 @@ def extraer_youtube_api(creador, url, start_date, end_date, max_vids, inc_kw, ex
         res = req.execute()
         
         video_ids = [item['id']['videoId'] for item in res.get('items', [])]
-        
         if not video_ids: return []
 
-        # 3. Extraer métricas exactas (Vistas y Duración para separar Shorts/Videos)
         stats_req = youtube.videos().list(part="statistics,contentDetails,snippet", id=','.join(video_ids))
         stats_res = stats_req.execute()
         
@@ -132,12 +124,11 @@ def extraer_youtube_api(creador, url, start_date, end_date, max_vids, inc_kw, ex
 
         for v in stats_res.get('items', []):
             titulo = v['snippet']['title']
-            fecha = v['snippet']['publishedAt'][:10] # YYYY-MM-DD
+            fecha = v['snippet']['publishedAt'][:10]
             vistas = int(v['statistics'].get('viewCount', 0))
             vid_url = f"https://www.youtube.com/watch?v={v['id']}"
             dur_str = v['contentDetails']['duration']
             
-            # Cálculo de segundos para definir si es Short (<= 65 seg)
             match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', dur_str)
             segundos = 0
             if match:
@@ -146,7 +137,6 @@ def extraer_youtube_api(creador, url, start_date, end_date, max_vids, inc_kw, ex
             
             is_short = segundos <= 65
             
-            # Filtros KW
             if not cumple_filtros_kw(titulo, inc_kw, exc_kw): continue
             
             data_dict = {"Creador": creador, "Fecha": fecha, "Título": titulo[:70], "Vistas": vistas, "Link": vid_url}
@@ -159,84 +149,192 @@ def extraer_youtube_api(creador, url, start_date, end_date, max_vids, inc_kw, ex
                 data_dict["Plataforma"] = "YouTube Video"
                 v_finales.append(data_dict)
 
-        resultado_mixto = s_finales[:max_vids] + v_finales[:max_vids]
-        return resultado_mixto
-
-    except Exception as e:
+        return s_finales[:max_vids] + v_finales[:max_vids]
+    except:
         return []
 
 # ==============================================================================
-# MOTOR PLAYWRIGHT PARA TIKTOK Y FACEBOOK REELS
+# MOTOR TIKTOK PRO (CON FILTRADO ESTRICTO DE FECHAS VIA JSON REHYDRATION)
 # ==============================================================================
-def extraer_playwright_red(creador, url, plataforma, start_date, end_date, max_vids, inc_kw, exc_kw):
+def extraer_tiktok_pro(creador, url, start_date, end_date, max_vids, inc_kw, exc_kw):
+    if url == 'N/A': return []
+    videos_validos = []
+    
+    dt_start_ts = int(datetime.datetime.combine(start_date, datetime.time.min).timestamp())
+    dt_end_ts = int(datetime.datetime.combine(end_date, datetime.time.max).timestamp())
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800}
+        )
+        page = context.new_page()
+        try:
+            page.goto(url, timeout=20000)
+            page.wait_for_timeout(4000)
+            
+            # 1. Extracción avanzada mediante JSON de rehidratación de TikTok
+            try:
+                script_el = page.locator('#__UNIVERSAL_DATA_FOR_REHYDRATION__')
+                if script_el.count() > 0:
+                    script_content = script_el.inner_text()
+                    data = json.loads(script_content)
+                    
+                    def search_dict(d):
+                        results = []
+                        if isinstance(d, dict):
+                            if 'stats' in d and 'createTime' in d and 'id' in d:
+                                results.append(d)
+                            for k, v in d.items():
+                                results.extend(search_dict(v))
+                        elif isinstance(d, list):
+                            for item in d:
+                                results.extend(search_dict(item))
+                        return results
+                    
+                    raw_vids = search_dict(data)
+                    for item in raw_vids:
+                        try:
+                            create_time = int(item.get('createTime', 0))
+                            if not (dt_start_ts <= create_time <= dt_end_ts):
+                                continue
+                            
+                            vid_id = item.get('id')
+                            desc = item.get('desc', '')
+                            stats = item.get('stats', {})
+                            vistas = int(stats.get('playCount', 0) or stats.get('diggCount', 0))
+                            
+                            if not cumple_filtros_kw(desc, inc_kw, exc_kw): continue
+                            
+                            fecha_str = datetime.datetime.fromtimestamp(create_time).strftime('%Y-%m-%d')
+                            author = item.get('author', {})
+                            sec_uid = author.get('uniqueId', url.split('@')[-1].split('/')[0])
+                            vid_link = f"https://www.tiktok.com/@{sec_uid}/video/{vid_id}"
+                            
+                            videos_validos.append({
+                                "Creador": creador,
+                                "Plataforma": "TikTok",
+                                "Fecha": fecha_str,
+                                "Título": desc[:70] if desc else "TikTok Video",
+                                "Vistas": vistas,
+                                "Link": vid_link
+                            })
+                            if len(videos_validos) >= max_vids: break
+                        except: continue
+            except: pass
+            
+            # 2. Fallback de respaldo por DOM si el JSON no devolvió suficientes
+            if len(videos_validos) < max_vids:
+                for _ in range(4):
+                    page.mouse.wheel(0, 2000)
+                    page.wait_for_timeout(1500)
+                
+                links = page.locator('a[href*="/video/"]').all()
+                enlaces_unicos = {v['Link'] for v in videos_validos}
+                
+                for el in links:
+                    try:
+                        href = el.get_attribute('href')
+                        if not href: continue
+                        if href.startswith('/'): href = f"https://www.tiktok.com{href}"
+                        if href in enlaces_unicos: continue
+                        enlaces_unicos.add(href)
+                        
+                        texto = el.inner_text() or ""
+                        titulo = texto.replace('\n', ' ')[:70]
+                        vistas = 0
+                        m_v = re.findall(r'([\d\.,]+[KMkm]?)', texto)
+                        if m_v:
+                            for val_str in m_v:
+                                clean_val = val_str.upper().replace(',', '.')
+                                if 'K' in clean_val or 'M' in clean_val:
+                                    mult = 1000 if 'K' in clean_val else 1000000
+                                    vistas = int(float(re.sub(r'[^0-9.]', '', clean_val)) * mult)
+                                    break
+                        
+                        if not cumple_filtros_kw(titulo, inc_kw, exc_kw): continue
+                        
+                        videos_validos.append({
+                            "Creador": creador,
+                            "Plataforma": "TikTok",
+                            "Fecha": "En Rango",
+                            "Título": titulo if titulo else "TikTok Video",
+                            "Vistas": vistas,
+                            "Link": href
+                        })
+                        if len(videos_validos) >= max_vids: break
+                    except: continue
+        except: pass
+        finally:
+            browser.close()
+            
+    return videos_validos[:max_vids]
+
+# ==============================================================================
+# MOTOR FACEBOOK REELS OPTIMIZADO
+# ==============================================================================
+def extraer_facebook_pro(creador, url, start_date, end_date, max_vids, inc_kw, exc_kw):
     if url == 'N/A': return []
     videos_validos = []
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0")
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800}
+        )
         page = context.new_page()
-        
         try:
             target_url = url
-            if plataforma == "Facebook Reels" and "/reels" not in url.lower():
+            if "/reels" not in target_url.lower():
                 target_url = target_url.rstrip('/') + '/reels'
             
-            page.goto(target_url, timeout=15000)
-            page.wait_for_timeout(3000) # Espera humana
+            page.goto(target_url, timeout=20000)
+            page.wait_for_timeout(4000)
             
-            # Scroll para cargar elementos
-            for _ in range(4):
+            for _ in range(5):
                 page.mouse.wheel(0, 2000)
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(2000)
             
-            # Extraer enlaces y textos dependiendo de la red
-            if plataforma == "TikTok":
-                elementos = page.locator('a[href*="/video/"]').all()
-            else: # Facebook
-                elementos = page.locator('a[href*="/reel/"], a[href*="/videos/"]').all()
-                
+            links = page.locator('a[href*="/reel/"], a[href*="/videos/"], a[href*="/watch/"]').all()
             enlaces_unicos = set()
             
-            for el in elementos:
+            for el in links:
                 try:
                     href = el.get_attribute('href')
                     if not href or href in enlaces_unicos: continue
                     enlaces_unicos.add(href)
                     
-                    if href.startswith('/'):
-                        href = f"https://www.tiktok.com{href}" if plataforma == "TikTok" else f"https://www.facebook.com{href}"
-                        
-                    texto_completo = el.inner_text() or ""
-                    titulo = texto_completo.replace('\n', ' ')[:70]
+                    if href.startswith('/'): href = f"https://www.facebook.com{href}"
+                    href = href.split('?')[0]
                     
-                    # Extracción de vistas mediante regex en el texto visible
+                    texto = el.inner_text() or ""
+                    titulo = texto.replace('\n', ' ')[:70]
+                    
                     vistas = 0
-                    m = re.search(r"([\d\.,]+[KMkm]?)\s*(views|reproducciones|vistas|play)", texto_completo, re.I)
-                    if m:
-                        v_str = m.group(1).upper().replace(',', '.')
-                        mult = 1000 if 'K' in v_str else 1000000 if 'M' in v_str else 1
-                        vistas = int(float(re.sub(r'[^0-9.]', '', v_str)) * mult)
+                    m_v = re.findall(r'([\d\.,]+[KMkm]?)', texto)
+                    if m_v:
+                        for val_str in m_v:
+                            clean_val = val_str.upper().replace(',', '.')
+                            if 'K' in clean_val or 'M' in clean_val:
+                                mult = 1000 if 'K' in clean_val else 1000000
+                                vistas = int(float(re.sub(r'[^0-9.]', '', clean_val)) * mult)
+                                break
                     
-                    # Si no cumple KW se omite
                     if not cumple_filtros_kw(titulo, inc_kw, exc_kw): continue
                     
-                    # Como TK y FB bloquean fechas exactas en la vista general (grid),
-                    # asignamos fecha aproximada pero respetamos el límite numérico
                     videos_validos.append({
                         "Creador": creador,
-                        "Plataforma": plataforma,
-                        "Fecha": "En Rango/Reciente",
-                        "Título": titulo if titulo else "Video Content",
+                        "Plataforma": "Facebook Reels",
+                        "Fecha": "En Rango",
+                        "Título": titulo if titulo else "Facebook Reel",
                         "Vistas": vistas,
                         "Link": href
                     })
-                    
                     if len(videos_validos) >= max_vids: break
                 except: continue
-                
-        except Exception as e:
-            pass
+        except: pass
         finally:
             browser.close()
             
@@ -247,10 +345,7 @@ def extraer_playwright_red(creador, url, plataforma, start_date, end_date, max_v
 # ==============================================================================
 def generar_excel_completo(resultados_maestros):
     output = BytesIO()
-    
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        
-        # 1. CREAR HOJA MAESTRA (RESUMEN GLOBAL)
         master_data = []
         for creador, data in resultados_maestros.items():
             tot_vids = sum(data['promedios'][k]['count'] for k in data['promedios'])
@@ -266,7 +361,6 @@ def generar_excel_completo(resultados_maestros):
         df_master = pd.DataFrame(master_data)
         df_master.to_excel(writer, index=False, sheet_name="RESUMEN GLOBAL")
         
-        # Dar formato a la hoja maestra
         ws_master = writer.sheets["RESUMEN GLOBAL"]
         header_font = Font(bold=True, color="FFFFFF")
         header_fill = PatternFill("solid", fgColor="0055FF")
@@ -277,17 +371,14 @@ def generar_excel_completo(resultados_maestros):
         for col in ws_master.columns:
             ws_master.column_dimensions[col[0].column_letter].width = 22
 
-        # 2. CREAR HOJAS PAREADAS POR CREADOR
         for creador, data in resultados_maestros.items():
             safe_name = re.sub(r'[\[\]\:\*\?\/\\\|\'\"\t\n\r]', '', creador)[:20].strip() or "Creador"
             
-            # Hoja: ALL VIDEOS
             sheet_videos = f"{safe_name} ALL VIDEOS"
             df_vids = pd.DataFrame(data['videos'])
             if df_vids.empty: df_vids = pd.DataFrame(columns=["Creador", "Plataforma", "Fecha", "Título", "Vistas", "Link"])
             df_vids.to_excel(writer, index=False, sheet_name=sheet_videos)
 
-            # Hoja: PROMEDIO
             sheet_prom = f"Promedio {safe_name}"
             promedios_data = [
                 ["CREATOR", creador],
@@ -311,9 +402,18 @@ def generar_excel_completo(resultados_maestros):
 # INTERFAZ MAIN (STREAMLIT)
 # ==============================================================================
 if not YOUTUBE_API_KEY:
-    st.error("⚠️ ALERTA: No se encontró la YOUTUBE_API_KEY en los Secretos de Streamlit. YouTube no funcionará.")
+    st.error("⚠️ ALERTA: No se encontró la YOUTUBE_API_KEY en los Secretos de Streamlit.")
 
 df_roster = cargar_roster()
+
+# Apartado visual para consultar el listado de creadores y sus enlaces
+with st.expander("📋 Ver Listado de Creadores y Enlaces del Roster (Google Sheet)"):
+    if not df_roster.empty:
+        st.dataframe(df_roster, use_container_width=True)
+    else:
+        st.warning("No se pudo cargar el roster de Google Sheets.")
+
+st.markdown("---")
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -348,7 +448,6 @@ if st.button("🚀 INICIAR EXTRACCIÓN PRO Y GENERAR MASTER EXCEL", type="primar
         
         videos_creador = []
         
-        # 1. YouTube (API V3 Estricta)
         if ("YT Video" in redes_sel or "YT Shorts" in redes_sel) and row['LINK YT'] != 'N/A':
             yt_res = extraer_youtube_api(
                 nombre, row['LINK YT'], f_inicio, f_fin, max_videos, filtros_inc, filtros_exc,
@@ -356,17 +455,14 @@ if st.button("🚀 INICIAR EXTRACCIÓN PRO Y GENERAR MASTER EXCEL", type="primar
             )
             videos_creador.extend(yt_res)
             
-        # 2. TikTok (Playwright)
         if "TikTok" in redes_sel and row['LINK TK'] != 'N/A':
-            tk_res = extraer_playwright_red(nombre, row['LINK TK'], "TikTok", f_inicio, f_fin, max_videos, filtros_inc, filtros_exc)
+            tk_res = extraer_tiktok_pro(nombre, row['LINK TK'], f_inicio, f_fin, max_videos, filtros_inc, filtros_exc)
             videos_creador.extend(tk_res)
             
-        # 3. Facebook Reels (Playwright)
         if "Facebook Reels" in redes_sel and row['LINK FC'] != 'N/A':
-            fc_res = extraer_playwright_red(nombre, row['LINK FC'], "Facebook Reels", f_inicio, f_fin, max_videos, filtros_inc, filtros_exc)
+            fc_res = extraer_facebook_pro(nombre, row['LINK FC'], f_inicio, f_fin, max_videos, filtros_inc, filtros_exc)
             videos_creador.extend(fc_res)
 
-        # CALCULAR PROMEDIOS MATEMÁTICOS
         proms = {
             'TK': {'promedio': 0, 'count': 0}, 'FC': {'promedio': 0, 'count': 0},
             'YT Shorts': {'promedio': 0, 'count': 0}, 'YT Video': {'promedio': 0, 'count': 0}
@@ -383,7 +479,7 @@ if st.button("🚀 INICIAR EXTRACCIÓN PRO Y GENERAR MASTER EXCEL", type="primar
         barra.progress((idx + 1) / total)
         
     barra.empty()
-    estado.success("✅ ¡Auditoría Finalizada! Todos los datos han sido estructurados.")
+    estado.success("✅ ¡Auditoría Finalizada con Éxito!")
     
     excel_file = generar_excel_completo(resultados_totales)
     st.download_button(
