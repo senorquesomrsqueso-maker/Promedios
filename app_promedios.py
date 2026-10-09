@@ -26,7 +26,7 @@ st.markdown("""
     </style>
     <div class="title-box">
         <p class="m-title">BS LATAM • MÓDULO DE PROMEDIOS PRO</p>
-        <p class="s-title">API YOUTUBE V3 | TIKTOK & FB PLAYWRIGHT PRO | MASTER SHEET + ROSTER</p>
+        <p class="s-title">API YOUTUBE V3 | TIKTOK PRO & FB GENERAL | MASTER SHEET + ROSTER</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -79,7 +79,7 @@ def cumple_filtros_kw(titulo, inc_kw, exc_kw):
     return True
 
 # ==============================================================================
-# MOTOR YOUTUBE V3 (ESTRICTO POR FECHAS) - INTACTO
+# MOTOR YOUTUBE V3 (ESTRICTO POR FECHAS) - INTACTO Y FUNCIONAL
 # ==============================================================================
 def extraer_youtube_api(creador, url, start_date, end_date, max_vids, inc_kw, exc_kw, extraer_shorts, extraer_videos):
     if not YOUTUBE_API_KEY or url == 'N/A': return []
@@ -154,7 +154,7 @@ def extraer_youtube_api(creador, url, start_date, end_date, max_vids, inc_kw, ex
         return []
 
 # ==============================================================================
-# MOTOR TIKTOK PRO (CON FILTRADO ESTRICTO DE FECHAS VIA JSON REHYDRATION)
+# MOTOR TIKTOK PRO (ESTILO SEARCH PRO CON JSON REHYDRATION Y FECHAS)
 # ==============================================================================
 def extraer_tiktok_pro(creador, url, start_date, end_date, max_vids, inc_kw, exc_kw):
     if url == 'N/A': return []
@@ -174,7 +174,6 @@ def extraer_tiktok_pro(creador, url, start_date, end_date, max_vids, inc_kw, exc
             page.goto(url, timeout=20000)
             page.wait_for_timeout(4000)
             
-            # 1. Extracción avanzada mediante JSON de rehidratación de TikTok
             try:
                 script_el = page.locator('#__UNIVERSAL_DATA_FOR_REHYDRATION__')
                 if script_el.count() > 0:
@@ -224,7 +223,6 @@ def extraer_tiktok_pro(creador, url, start_date, end_date, max_vids, inc_kw, exc
                         except: continue
             except: pass
             
-            # 2. Fallback de respaldo por DOM si el JSON no devolvió suficientes
             if len(videos_validos) < max_vids:
                 for _ in range(4):
                     page.mouse.wheel(0, 2000)
@@ -272,9 +270,9 @@ def extraer_tiktok_pro(creador, url, start_date, end_date, max_vids, inc_kw, exc
     return videos_validos[:max_vids]
 
 # ==============================================================================
-# MOTOR FACEBOOK REELS OPTIMIZADO
+# MOTOR FACEBOOK GENERAL (EXTRACCIÓN LIBRE SIN COLAPSAR)
 # ==============================================================================
-def extraer_facebook_pro(creador, url, start_date, end_date, max_vids, inc_kw, exc_kw):
+def extraer_facebook_general(creador, url, start_date, end_date, max_vids, inc_kw, exc_kw):
     if url == 'N/A': return []
     videos_validos = []
     
@@ -286,18 +284,16 @@ def extraer_facebook_pro(creador, url, start_date, end_date, max_vids, inc_kw, e
         )
         page = context.new_page()
         try:
-            target_url = url
-            if "/reels" not in target_url.lower():
-                target_url = target_url.rstrip('/') + '/reels'
-            
-            page.goto(target_url, timeout=20000)
+            # Carga limpia y directa de la URL del perfil general del roster sin forzar sufijos estrictos
+            page.goto(url, timeout=20000)
             page.wait_for_timeout(4000)
             
             for _ in range(5):
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(2000)
             
-            links = page.locator('a[href*="/reel/"], a[href*="/videos/"], a[href*="/watch/"]').all()
+            # Selectores amplios y flexibles para capturar cualquier contenido de video o reel de la página
+            links = page.locator('a[href*="/reel/"], a[href*="/videos/"], a[href*="/watch/"], a[href*="/video/"]').all()
             enlaces_unicos = set()
             
             for el in links:
@@ -328,7 +324,7 @@ def extraer_facebook_pro(creador, url, start_date, end_date, max_vids, inc_kw, e
                         "Creador": creador,
                         "Plataforma": "Facebook Reels",
                         "Fecha": "En Rango",
-                        "Título": titulo if titulo else "Facebook Reel",
+                        "Título": titulo if titulo else "Facebook Video",
                         "Vistas": vistas,
                         "Link": href
                     })
@@ -460,7 +456,7 @@ if st.button("🚀 INICIAR EXTRACCIÓN PRO Y GENERAR MASTER EXCEL", type="primar
             videos_creador.extend(tk_res)
             
         if "Facebook Reels" in redes_sel and row['LINK FC'] != 'N/A':
-            fc_res = extraer_facebook_pro(nombre, row['LINK FC'], f_inicio, f_fin, max_videos, filtros_inc, filtros_exc)
+            fc_res = extraer_facebook_general(nombre, row['LINK FC'], f_inicio, f_fin, max_videos, filtros_inc, filtros_exc)
             videos_creador.extend(fc_res)
 
         proms = {
